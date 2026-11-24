@@ -44,3 +44,6 @@ next-env.d.ts
 .grading/
 .vitest-cache/
 
+
+# eval reports
+/evals/results/

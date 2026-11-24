@@ -9,6 +9,7 @@ import {
   type ModelId,
 } from "@/lib/ai/models";
 import { costUsd } from "@/lib/ai/pricing";
+import type { TraceContext } from "@/lib/ai/tracing";
 
 // Every model call in the app goes through this file, so each one is logged
 // with its tokens, cost and how long it took. The log goes to the terminal
@@ -28,7 +29,15 @@ export function isAiConfigured(): boolean {
 }
 
 /** Which module and feature made the call, for the ai_calls log. */
-export type CallInfo = { module: number; feature: string; model?: ModelId };
+export type CallInfo = {
+  module: number;
+  feature: string;
+  model?: ModelId;
+  /** Module 5: the Langfuse trace this call belongs to (omit for no tracing). */
+  trace?: TraceContext;
+  /** Module 5: which agent made the call, shown on the Langfuse generation. */
+  agent?: string;
+};
 
 // Omit that keeps generateText's "prompt or messages" union intact.
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
@@ -66,6 +75,37 @@ function languageModel(model: ModelId) {
   return google()(id);
 }
 
+/** Opens a Langfuse generation for a call, if it belongs to a trace. */
+type Finish = (ok: boolean, usage?: Usage, output?: unknown) => void;
+
+function generationFor(info: CallInfo, model: ModelId, input: unknown): Finish {
+  const ctx = info.trace;
+  if (!ctx) return () => {};
+  const started = performance.now();
+  const generation = ctx.trace.generation({
+    name: info.agent ?? info.feature,
+    model: model.slice("google/".length),
+    input,
+    metadata: { agent: info.agent ?? info.feature, feature: info.feature },
+  });
+  return (ok: boolean, usage?: Usage, output?: unknown) => {
+    const input = usage?.inputTokens ?? 0;
+    const out = usage?.outputTokens ?? 0;
+    const cost = costUsd(model, input, out) ?? 0;
+    ctx.metrics.inputTokens += input;
+    ctx.metrics.outputTokens += out;
+    ctx.metrics.costUsd += cost;
+    ctx.metrics.modelMs += performance.now() - started;
+    ctx.metrics.modelCalls++;
+    generation.end({
+      output,
+      level: ok ? "DEFAULT" : "ERROR",
+      usageDetails: { input, output: out, total: input + out },
+      costDetails: { total: cost },
+    });
+  };
+}
+
 /** Prints one line per model call, so the cost and time are visible. */
 async function logCall(row: AiCallRow): Promise<void> {
   console.info("[ai_calls]", JSON.stringify(row));
@@ -98,23 +138,33 @@ function rowFor(info: CallInfo, model: ModelId, started: number) {
 async function tracked<T extends { usage: Usage }>(
   info: CallInfo,
   run: (model: ModelId) => Promise<T>,
+  input?: unknown,
 ): Promise<T> {
   const model = info.model ?? defaultModel();
   const row = rowFor(info, model, performance.now());
+  const generation = generationFor(info, model, input);
   try {
     const result = await run(model);
     await logCall(row(true, result.usage));
+    generation(
+      true,
+      result.usage,
+      (result as { text?: string }).text ?? undefined,
+    );
     return result;
   } catch (error) {
     if (!(error instanceof AiNotConfiguredError)) await logCall(row(false));
+    generation(false, undefined, String(error));
     throw error;
   }
 }
 
 /** Generates text. Example: callText({ module: 3, feature: "support-answer" }, { prompt }) */
 export async function callText(info: CallInfo, options: TextOptions) {
-  return tracked(info, (model) =>
-    generateText({ ...options, model: languageModel(model) }),
+  return tracked(
+    info,
+    (model) => generateText({ ...options, model: languageModel(model) }),
+    options.prompt ?? options.messages,
   );
 }
 
@@ -124,12 +174,15 @@ export async function callObject<Schema extends z.ZodType>(
   options: TextOptions & { schema: Schema },
 ) {
   const { schema, ...rest } = options;
-  const result = await tracked(info, (model) =>
-    generateText({
-      ...rest,
-      model: languageModel(model),
-      output: Output.object({ schema }),
-    }),
+  const result = await tracked(
+    info,
+    (model) =>
+      generateText({
+        ...rest,
+        model: languageModel(model),
+        output: Output.object({ schema }),
+      }),
+    rest.prompt ?? rest.messages,
   );
   // Spreading `rest` loses generateText's output type; Output.object has
   // already validated it against `schema`, so restore the type here.
@@ -187,11 +240,18 @@ type StreamOptions = DistributiveOmit<
 export function callStream(info: CallInfo, options: StreamOptions) {
   const model = info.model ?? defaultModel();
   const row = rowFor(info, model, performance.now());
+  const generation = generationFor(info, model, options.messages);
   return streamText({
     ...options,
     model: languageModel(model),
-    onFinish: ({ totalUsage }) => logCall(row(true, totalUsage)),
-    onError: () => logCall(row(false)),
+    onFinish: ({ totalUsage, text }) => {
+      generation(true, totalUsage, text);
+      return logCall(row(true, totalUsage));
+    },
+    onError: () => {
+      generation(false);
+      return logCall(row(false));
+    },
   });
 }
 
