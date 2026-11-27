@@ -171,3 +171,21 @@ the tests and a golden-set evaluation with an AI judge run in GitHub Actions
 on every pull request, with `main` protected; every AI call is traced in
 Langfuse; and one support agent that does everything is compared with the two
 agents on the same golden set. Langfuse is the only eval and monitoring tool.
+
+## Module 5: Safe to ship (CI, tracing, evals, single vs multi agent)
+
+**Summary:** Ask Copper is tested in CI, traced in Langfuse, graded on a golden set by an AI judge, and compared with a one-agent version.
+
+| Piece | Where | What it does |
+|---|---|---|
+| CI | `.github/workflows/ci.yml` | `check` (lint, typecheck, tests, build on 3 OSes) and `evals` run on every pull request; `main` is protected so both must pass |
+| Tracing | `lib/ai/tracing.ts`, `lib/copper/assistant/run.ts`, `lib/ai/call.ts` | Langfuse JS/TS SDK v6 (OpenTelemetry). Each chat is one trace: `ask-copper` (agent, input = customer message, output = reply) → an agent observation per agent (`copper-agent`, `refund-agent`, `support-agent`) → one `generate-response` generation per model call (model, tokens, cost, thinking) and one `tool` observation per tool call, plus a `handoff` event. No keys, no tracing, no crash |
+| Engine | `lib/copper/assistant/run.ts` | The chat logic, shared by the Server Action (`ask.ts`) and the evals. `variant: "multi"` (Copper + Refund agent) or `"single"` |
+| Single agent | `SINGLE_AGENT_INSTRUCTIONS`, `singleAgentTools` | One agent with every tool and no handoff. Set `COPPER_AGENT_MODE=single` to use it in the app |
+| Golden set | `evals/golden-set.ts` | 14 questions: what a good answer does, plus tool checks |
+| AI judge | `evals/judge.ts` | Gemini (via `callObject`) grades each answer 1-5 and pass/fail |
+| Runner | `evals/run.mts` (`npm run evals`) | Runs the golden set (a Langfuse dataset) as an experiment per variant (`multi-…`, `single-…`), writes scores `pass`, `judge_score`, `tools_ok` and `pass_rate`, prints a summary table. Cost and time come from the traces |
+
+**Data flow:** eval case → `runAskCopper` (traced) → tool checks + AI judge → scores on the Langfuse trace → dataset run `multi-…` / `single-…` → summary in the PR check.
+
+**Decisions and trade-offs:** Langfuse is the only eval and monitoring tool. A case passes only if the code checks and the judge both pass. The evals call real models, so they cost a few cents and run on pull requests only, not every push.

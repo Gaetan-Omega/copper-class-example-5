@@ -9,6 +9,11 @@ import {
   type ModelId,
 } from "@/lib/ai/models";
 import { costUsd } from "@/lib/ai/pricing";
+import {
+  endGeneration,
+  startGeneration,
+  type TraceContext,
+} from "@/lib/ai/tracing";
 
 // Every model call in the app goes through this file, so each one is logged
 // with its tokens, cost and how long it took. The log goes to the terminal
@@ -28,7 +33,15 @@ export function isAiConfigured(): boolean {
 }
 
 /** Which module and feature made the call, for the ai_calls log. */
-export type CallInfo = { module: number; feature: string; model?: ModelId };
+export type CallInfo = {
+  module: number;
+  feature: string;
+  model?: ModelId;
+  /** Module 5: the Langfuse trace this call belongs to (omit for no tracing). */
+  trace?: TraceContext;
+  /** Module 5: the Langfuse generation name (default: the feature). */
+  generationName?: string;
+};
 
 // Omit that keeps generateText's "prompt or messages" union intact.
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
@@ -51,6 +64,12 @@ export type AiCallRow = {
   created_at: string;
 };
 
+/** AI_MAX_RETRIES raises the retries on rate limits (the evals set it). */
+function retries(): { maxRetries?: number } {
+  const n = Number(process.env.AI_MAX_RETRIES);
+  return Number.isFinite(n) && n > 0 ? { maxRetries: n } : {};
+}
+
 function google() {
   const googleKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim();
   if (!googleKey) throw new AiNotConfiguredError();
@@ -64,6 +83,32 @@ function languageModel(model: ModelId) {
       ? entry.googleId
       : model.slice("google/".length);
   return google()(id);
+}
+
+/** Opens a Langfuse generation for a one-shot call (the judge), if traced. */
+type Finish = (ok: boolean, usage?: Usage, output?: unknown) => void;
+
+function generationFor(info: CallInfo, model: ModelId, input: unknown): Finish {
+  const ctx = info.trace;
+  const generation = startGeneration(ctx, info.generationName ?? info.feature, {
+    model: model.slice("google/".length),
+    input,
+    metadata: { feature: info.feature },
+  });
+  if (!ctx || !generation) return () => {};
+  const started = performance.now();
+  return (ok, usage, output) => {
+    const input = usage?.inputTokens ?? 0;
+    const out = usage?.outputTokens ?? 0;
+    endGeneration(ctx, generation, {
+      output,
+      inputTokens: input,
+      outputTokens: out,
+      costUsd: costUsd(model, input, out),
+      ms: performance.now() - started,
+      ok,
+    });
+  };
 }
 
 /** Prints one line per model call, so the cost and time are visible. */
@@ -98,23 +143,34 @@ function rowFor(info: CallInfo, model: ModelId, started: number) {
 async function tracked<T extends { usage: Usage }>(
   info: CallInfo,
   run: (model: ModelId) => Promise<T>,
+  input?: unknown,
 ): Promise<T> {
   const model = info.model ?? defaultModel();
   const row = rowFor(info, model, performance.now());
+  const generation = generationFor(info, model, input);
   try {
     const result = await run(model);
     await logCall(row(true, result.usage));
+    generation(
+      true,
+      result.usage,
+      (result as { text?: string }).text ?? undefined,
+    );
     return result;
   } catch (error) {
     if (!(error instanceof AiNotConfiguredError)) await logCall(row(false));
+    generation(false, undefined, String(error));
     throw error;
   }
 }
 
 /** Generates text. Example: callText({ module: 3, feature: "support-answer" }, { prompt }) */
 export async function callText(info: CallInfo, options: TextOptions) {
-  return tracked(info, (model) =>
-    generateText({ ...options, model: languageModel(model) }),
+  return tracked(
+    info,
+    (model) =>
+      generateText({ ...retries(), ...options, model: languageModel(model) }),
+    options.prompt ?? options.messages,
   );
 }
 
@@ -124,12 +180,16 @@ export async function callObject<Schema extends z.ZodType>(
   options: TextOptions & { schema: Schema },
 ) {
   const { schema, ...rest } = options;
-  const result = await tracked(info, (model) =>
-    generateText({
-      ...rest,
-      model: languageModel(model),
-      output: Output.object({ schema }),
-    }),
+  const result = await tracked(
+    info,
+    (model) =>
+      generateText({
+        ...retries(),
+        ...rest,
+        model: languageModel(model),
+        output: Output.object({ schema }),
+      }),
+    rest.prompt ?? rest.messages,
   );
   // Spreading `rest` loses generateText's output type; Output.object has
   // already validated it against `schema`, so restore the type here.
@@ -162,6 +222,7 @@ export async function callEmbedMany(
     const result = await embedMany({
       model: google().embedding(EMBEDDING_MODEL.slice("google/".length)),
       values,
+      ...retries(),
       providerOptions: {
         google: { outputDimensionality: EMBEDDING_DIMENSIONS },
       },
@@ -188,6 +249,7 @@ export function callStream(info: CallInfo, options: StreamOptions) {
   const model = info.model ?? defaultModel();
   const row = rowFor(info, model, performance.now());
   return streamText({
+    ...retries(),
     ...options,
     model: languageModel(model),
     onFinish: ({ totalUsage }) => logCall(row(true, totalUsage)),
