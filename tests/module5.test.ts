@@ -8,7 +8,7 @@ import { GOLDEN_SET } from "@/evals/golden-set";
 import { checkTools, markdown, summarize } from "@/evals/harness";
 import { judgePrompt } from "@/evals/judge";
 import { finalValue } from "@/lib/ai/live";
-import { isTracingConfigured, startTrace } from "@/lib/ai/tracing";
+import { isTracingConfigured, withTrace } from "@/lib/ai/tracing";
 import { runAskCopper } from "@/lib/copper/assistant/run";
 import { requestRefund } from "@/lib/copper/orders";
 
@@ -150,9 +150,13 @@ describe("eval checks", () => {
 });
 
 describe("tracing", () => {
-  it("does nothing, and never crashes, without Langfuse keys", () => {
+  it("does nothing, and never crashes, without Langfuse keys", async () => {
     expect(isTracingConfigured()).toBe(false);
-    expect(startTrace({ name: "x", input: "hi" })).toBeUndefined();
+    const seen = await withTrace(
+      { name: "x", input: "hi" },
+      async (ctx) => ctx,
+    );
+    expect(seen).toBeUndefined();
   });
 });
 

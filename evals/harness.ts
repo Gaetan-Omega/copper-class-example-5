@@ -1,6 +1,6 @@
 // Runs one golden-set case through Ask Copper and grades it (Module 5).
 import { finalValue } from "@/lib/ai/live";
-import { newMetrics, startTrace, type Metrics } from "@/lib/ai/tracing";
+import { newMetrics, withTrace, type Metrics } from "@/lib/ai/tracing";
 import { toolCallsOf } from "@/lib/copper/assistant/progress";
 import { runAskCopper, type Variant } from "@/lib/copper/assistant/run";
 import type { GoldenCase } from "@/evals/golden-set";
@@ -16,7 +16,6 @@ export type CaseResult = {
   reply: string;
   tools: string[];
   answeredBy: string | undefined;
-  traceId: string | null;
   metrics: Metrics & { totalMs: number };
   error?: string;
 };
@@ -48,84 +47,116 @@ export function checkTools(
   return problems;
 }
 
+/** What Ask Copper did for one question, before grading. */
+export type Answer = {
+  reply: string;
+  status: "done" | "error";
+  calls: { name: string; input?: unknown; output?: unknown }[];
+  answeredBy: string | undefined;
+  metrics: Metrics & { totalMs: number };
+};
+
+/** Asks Copper one golden-set question, inside a Langfuse trace. */
+export async function answerCase(
+  testCase: GoldenCase,
+  variant: Variant,
+): Promise<Answer> {
+  const started = performance.now();
+  return withTrace(
+    {
+      name: "ask-copper",
+      input: testCase.question,
+      metadata: { variant, caseId: testCase.id, source: "eval" },
+    },
+    async (ctx) => {
+      const metrics = ctx?.metrics ?? newMetrics();
+      const { progress } = await runAskCopper(
+        {
+          messages: [{ role: "user", content: testCase.question }],
+          useTools: true,
+          desk: testCase.desk,
+        },
+        { variant, trace: ctx },
+      );
+      const final = await finalValue(progress);
+      return {
+        reply: final.reply,
+        status: final.status === "done" ? "done" : "error",
+        calls: toolCallsOf(final).filter((c) => !HANDOFFS.includes(c.name)),
+        answeredBy: final.agent,
+        metrics: {
+          ...metrics,
+          totalMs: Math.round(performance.now() - started),
+        },
+      };
+    },
+  );
+}
+
+/** Grades an answer: the code checks and the AI judge. */
+export async function gradeCase(testCase: GoldenCase, answer: Answer) {
+  const toolProblems = checkTools(testCase, answer.calls);
+  const verdict = await judge(testCase, {
+    reply: answer.reply,
+    tools: answer.calls,
+  });
+  const pass =
+    toolProblems.length === 0 && verdict.pass && answer.status === "done";
+  return { toolProblems, verdict, pass };
+}
+
+/** Answers and grades one case (used by tests and quick local runs). */
 export async function runCase(
   testCase: GoldenCase,
   variant: Variant,
-  options: { runName: string } = { runName: "local" },
 ): Promise<CaseResult> {
-  const started = performance.now();
-  const ctx = startTrace({
-    name: `eval:${testCase.id}`,
-    input: testCase.question,
-    sessionId: options.runName,
-    tags: ["eval", variant, options.runName],
-    metadata: { variant, caseId: testCase.id },
-  });
-  const metrics = ctx?.metrics ?? newMetrics();
-  const base = {
+  try {
+    const answer = await answerCase(testCase, variant);
+    const graded = await gradeCase(testCase, answer);
+    return toResult(testCase, variant, answer, graded);
+  } catch (error) {
+    return failedResult(testCase, variant, error);
+  }
+}
+
+export function toResult(
+  testCase: GoldenCase,
+  variant: Variant,
+  answer: Answer,
+  graded: Awaited<ReturnType<typeof gradeCase>>,
+): CaseResult {
+  return {
     id: testCase.id,
     variant,
-    traceId: ctx?.trace.id ?? null,
+    pass: graded.pass,
+    toolsOk: graded.toolProblems.length === 0,
+    toolProblems: graded.toolProblems,
+    verdict: graded.verdict,
+    reply: answer.reply,
+    tools: answer.calls.map((c) => c.name),
+    answeredBy: answer.answeredBy,
+    metrics: answer.metrics,
   };
-  try {
-    const { progress } = await runAskCopper(
-      {
-        messages: [{ role: "user", content: testCase.question }],
-        useTools: true,
-        desk: testCase.desk,
-      },
-      { variant, trace: ctx },
-    );
-    const final = await finalValue(progress);
-    const calls = toolCallsOf(final).filter((c) => !HANDOFFS.includes(c.name));
-    const toolProblems = checkTools(testCase, calls);
-    const verdict = await judge(
-      testCase,
-      { reply: final.reply, tools: calls },
-      ctx,
-    );
-    const pass =
-      toolProblems.length === 0 && verdict.pass && final.status === "done";
-    const totalMs = Math.round(performance.now() - started);
-    if (ctx) {
-      ctx.trace.update({ output: final.reply });
-      ctx.trace.score({ name: "pass", value: pass ? 1 : 0 });
-      ctx.trace.score({
-        name: "judge_score",
-        value: verdict.score,
-        comment: verdict.reasoning,
-      });
-      ctx.trace.score({ name: "tools_ok", value: toolProblems.length ? 0 : 1 });
-      ctx.trace.score({ name: "latency_ms", value: totalMs });
-      ctx.trace.score({ name: "cost_usd", value: metrics.costUsd });
-    }
-    return {
-      ...base,
-      pass,
-      toolsOk: toolProblems.length === 0,
-      toolProblems,
-      verdict,
-      reply: final.reply,
-      tools: calls.map((c) => c.name),
-      answeredBy: final.agent,
-      metrics: { ...metrics, totalMs },
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    ctx?.trace.score({ name: "pass", value: 0, comment: message });
-    return {
-      ...base,
-      pass: false,
-      toolsOk: false,
-      toolProblems: [],
-      verdict: null,
-      reply: "",
-      tools: [],
-      answeredBy: undefined,
-      metrics: { ...metrics, totalMs: Math.round(performance.now() - started) },
-      error: message,
-    };
-  }
+}
+
+export function failedResult(
+  testCase: GoldenCase,
+  variant: Variant,
+  error: unknown,
+): CaseResult {
+  return {
+    id: testCase.id,
+    variant,
+    pass: false,
+    toolsOk: false,
+    toolProblems: [],
+    verdict: null,
+    reply: "",
+    tools: [],
+    answeredBy: undefined,
+    metrics: { ...newMetrics(), totalMs: 0 },
+    error: error instanceof Error ? error.message : String(error),
+  };
 }
 
 export type Summary = {

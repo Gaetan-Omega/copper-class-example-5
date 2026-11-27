@@ -9,7 +9,11 @@ import {
   type ModelId,
 } from "@/lib/ai/models";
 import { costUsd } from "@/lib/ai/pricing";
-import type { TraceContext } from "@/lib/ai/tracing";
+import {
+  endGeneration,
+  startGeneration,
+  type TraceContext,
+} from "@/lib/ai/tracing";
 
 // Every model call in the app goes through this file, so each one is logged
 // with its tokens, cost and how long it took. The log goes to the terminal
@@ -35,8 +39,8 @@ export type CallInfo = {
   model?: ModelId;
   /** Module 5: the Langfuse trace this call belongs to (omit for no tracing). */
   trace?: TraceContext;
-  /** Module 5: which agent made the call, shown on the Langfuse generation. */
-  agent?: string;
+  /** Module 5: the Langfuse generation name (default: the feature). */
+  generationName?: string;
 };
 
 // Omit that keeps generateText's "prompt or messages" union intact.
@@ -75,33 +79,28 @@ function languageModel(model: ModelId) {
   return google()(id);
 }
 
-/** Opens a Langfuse generation for a call, if it belongs to a trace. */
+/** Opens a Langfuse generation for a one-shot call (the judge), if traced. */
 type Finish = (ok: boolean, usage?: Usage, output?: unknown) => void;
 
 function generationFor(info: CallInfo, model: ModelId, input: unknown): Finish {
   const ctx = info.trace;
-  if (!ctx) return () => {};
-  const started = performance.now();
-  const generation = ctx.trace.generation({
-    name: info.agent ?? info.feature,
+  const generation = startGeneration(ctx, info.generationName ?? info.feature, {
     model: model.slice("google/".length),
     input,
-    metadata: { agent: info.agent ?? info.feature, feature: info.feature },
+    metadata: { feature: info.feature },
   });
-  return (ok: boolean, usage?: Usage, output?: unknown) => {
+  if (!ctx || !generation) return () => {};
+  const started = performance.now();
+  return (ok, usage, output) => {
     const input = usage?.inputTokens ?? 0;
     const out = usage?.outputTokens ?? 0;
-    const cost = costUsd(model, input, out) ?? 0;
-    ctx.metrics.inputTokens += input;
-    ctx.metrics.outputTokens += out;
-    ctx.metrics.costUsd += cost;
-    ctx.metrics.modelMs += performance.now() - started;
-    ctx.metrics.modelCalls++;
-    generation.end({
+    endGeneration(ctx, generation, {
       output,
-      level: ok ? "DEFAULT" : "ERROR",
-      usageDetails: { input, output: out, total: input + out },
-      costDetails: { total: cost },
+      inputTokens: input,
+      outputTokens: out,
+      costUsd: costUsd(model, input, out),
+      ms: performance.now() - started,
+      ok,
     });
   };
 }
@@ -240,18 +239,11 @@ type StreamOptions = DistributiveOmit<
 export function callStream(info: CallInfo, options: StreamOptions) {
   const model = info.model ?? defaultModel();
   const row = rowFor(info, model, performance.now());
-  const generation = generationFor(info, model, options.messages);
   return streamText({
     ...options,
     model: languageModel(model),
-    onFinish: ({ totalUsage, text }) => {
-      generation(true, totalUsage, text);
-      return logCall(row(true, totalUsage));
-    },
-    onError: () => {
-      generation(false);
-      return logCall(row(false));
-    },
+    onFinish: ({ totalUsage }) => logCall(row(true, totalUsage)),
+    onError: () => logCall(row(false)),
   });
 }
 

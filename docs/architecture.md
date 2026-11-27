@@ -179,12 +179,12 @@ agents on the same golden set. Langfuse is the only eval and monitoring tool.
 | Piece | Where | What it does |
 |---|---|---|
 | CI | `.github/workflows/ci.yml` | `check` (lint, typecheck, tests, build on 3 OSes) and `evals` run on every pull request; `main` is protected so both must pass |
-| Tracing | `lib/ai/tracing.ts`, `lib/ai/call.ts` | Every chat is a Langfuse trace: a generation per agent call (agent, model, tokens, cost, time) and a span per tool call. No keys, no tracing, no crash |
+| Tracing | `lib/ai/tracing.ts`, `lib/copper/assistant/run.ts`, `lib/ai/call.ts` | Langfuse JS/TS SDK v6 (OpenTelemetry). Each chat is one trace: `ask-copper` (agent, input = customer message, output = reply) → an agent observation per agent (`copper-agent`, `refund-agent`, `support-agent`) → one `generate-response` generation per model call (model, tokens, cost, thinking) and one `tool` observation per tool call, plus a `handoff` event. No keys, no tracing, no crash |
 | Engine | `lib/copper/assistant/run.ts` | The chat logic, shared by the Server Action (`ask.ts`) and the evals. `variant: "multi"` (Copper + Refund agent) or `"single"` |
 | Single agent | `SINGLE_AGENT_INSTRUCTIONS`, `singleAgentTools` | One agent with every tool and no handoff. Set `COPPER_AGENT_MODE=single` to use it in the app |
 | Golden set | `evals/golden-set.ts` | 14 questions: what a good answer does, plus tool checks |
 | AI judge | `evals/judge.ts` | Gemini (via `callObject`) grades each answer 1-5 and pass/fail |
-| Runner | `evals/run.ts` (`npm run evals`) | Runs both variants, writes Langfuse scores (`pass`, `judge_score`, `tools_ok`, `latency_ms`, `cost_usd`) and a dataset run per variant, prints a summary table |
+| Runner | `evals/run.ts` (`npm run evals`) | Runs the golden set (a Langfuse dataset) as an experiment per variant (`multi-…`, `single-…`), writes scores `pass`, `judge_score`, `tools_ok` and `pass_rate`, prints a summary table. Cost and time come from the traces |
 
 **Data flow:** eval case → `runAskCopper` (traced) → tool checks + AI judge → scores on the Langfuse trace → dataset run `multi-…` / `single-…` → summary in the PR check.
 

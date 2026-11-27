@@ -3,7 +3,7 @@
 // other AI call, so it is traced and costed in Langfuse too.
 import { z } from "zod";
 import { callObject } from "@/lib/ai/call";
-import type { TraceContext } from "@/lib/ai/tracing";
+import { withTrace } from "@/lib/ai/tracing";
 import type { GoldenCase } from "@/evals/golden-set";
 
 export const verdictSchema = z.object({
@@ -45,11 +45,25 @@ Grade the reply only against "What a good answer does". Facts must agree with th
 export async function judge(
   testCase: GoldenCase,
   answer: Answer,
-  trace?: TraceContext,
 ): Promise<Verdict> {
-  const { output } = await callObject(
-    { module: 5, feature: "eval-judge", agent: "judge", trace },
-    { prompt: judgePrompt(testCase, answer), schema: verdictSchema },
+  return withTrace(
+    {
+      name: "grade-answer",
+      input: { question: testCase.question, reply: answer.reply },
+      metadata: { caseId: testCase.id },
+    },
+    async (trace) => {
+      const { output } = await callObject(
+        {
+          module: 5,
+          feature: "eval-judge",
+          generationName: "judge-answer",
+          trace,
+        },
+        { prompt: judgePrompt(testCase, answer), schema: verdictSchema },
+      );
+      trace?.root.update({ output });
+      return output;
+    },
   );
-  return output;
 }
