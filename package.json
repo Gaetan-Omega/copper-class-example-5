@@ -16,7 +16,7 @@
     "start-module": "node scripts/start-module.mjs",
     "env:check": "node scripts/check-env.mjs",
     "embed-docs": "node scripts/embed-docs.mjs",
-    "evals": "tsx evals/run.ts"
+    "evals": "tsx evals/run.mts"
   },
   "dependencies": {
     "@ai-sdk/google": "4.0.93",

@@ -43,7 +43,20 @@ type Runtime = { sdk: NodeSDK; processor: LangfuseSpanProcessor };
 const holder = globalThis as { __copperLangfuse?: Runtime };
 let client: LangfuseClient | null | undefined;
 
+/** Pasted values sometimes carry quote marks or spaces; remove them. */
+function cleanEnv() {
+  for (const name of [
+    "LANGFUSE_PUBLIC_KEY",
+    "LANGFUSE_SECRET_KEY",
+    "LANGFUSE_BASE_URL",
+  ]) {
+    const value = process.env[name];
+    if (value) process.env[name] = value.trim().replace(/^["']+|["']+$/g, "");
+  }
+}
+
 export function isTracingConfigured(): boolean {
+  cleanEnv();
   return Boolean(
     process.env.LANGFUSE_PUBLIC_KEY?.trim() &&
     process.env.LANGFUSE_SECRET_KEY?.trim(),
@@ -54,11 +67,19 @@ export function isTracingConfigured(): boolean {
 function runtime(): Runtime | null {
   if (!isTracingConfigured()) return null;
   if (!holder.__copperLangfuse) {
+    // Keeps test and CI traces apart from real ones in Langfuse dashboards.
+    process.env.LANGFUSE_TRACING_ENVIRONMENT ??=
+      process.env.NODE_ENV === "production" ? "production" : "development";
     const processor = new LangfuseSpanProcessor({
       // Serverless functions can stop right after the response.
       exportMode: process.env.VERCEL ? "immediate" : "batched",
     });
-    const sdk = new NodeSDK({ spanProcessors: [processor] });
+    // No auto-detected host, user or path attributes on traces.
+    const sdk = new NodeSDK({
+      spanProcessors: [processor],
+      autoDetectResources: false,
+      serviceName: "copper-state-labs",
+    });
     sdk.start();
     holder.__copperLangfuse = { sdk, processor };
   }

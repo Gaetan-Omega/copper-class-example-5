@@ -184,7 +184,7 @@ agents on the same golden set. Langfuse is the only eval and monitoring tool.
 | Single agent | `SINGLE_AGENT_INSTRUCTIONS`, `singleAgentTools` | One agent with every tool and no handoff. Set `COPPER_AGENT_MODE=single` to use it in the app |
 | Golden set | `evals/golden-set.ts` | 14 questions: what a good answer does, plus tool checks |
 | AI judge | `evals/judge.ts` | Gemini (via `callObject`) grades each answer 1-5 and pass/fail |
-| Runner | `evals/run.ts` (`npm run evals`) | Runs the golden set (a Langfuse dataset) as an experiment per variant (`multi-…`, `single-…`), writes scores `pass`, `judge_score`, `tools_ok` and `pass_rate`, prints a summary table. Cost and time come from the traces |
+| Runner | `evals/run.mts` (`npm run evals`) | Runs the golden set (a Langfuse dataset) as an experiment per variant (`multi-…`, `single-…`), writes scores `pass`, `judge_score`, `tools_ok` and `pass_rate`, prints a summary table. Cost and time come from the traces |
 
 **Data flow:** eval case → `runAskCopper` (traced) → tool checks + AI judge → scores on the Langfuse trace → dataset run `multi-…` / `single-…` → summary in the PR check.
 
