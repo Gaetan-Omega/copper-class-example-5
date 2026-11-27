@@ -64,6 +64,12 @@ export type AiCallRow = {
   created_at: string;
 };
 
+/** AI_MAX_RETRIES raises the retries on rate limits (the evals set it). */
+function retries(): { maxRetries?: number } {
+  const n = Number(process.env.AI_MAX_RETRIES);
+  return Number.isFinite(n) && n > 0 ? { maxRetries: n } : {};
+}
+
 function google() {
   const googleKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim();
   if (!googleKey) throw new AiNotConfiguredError();
@@ -162,7 +168,8 @@ async function tracked<T extends { usage: Usage }>(
 export async function callText(info: CallInfo, options: TextOptions) {
   return tracked(
     info,
-    (model) => generateText({ ...options, model: languageModel(model) }),
+    (model) =>
+      generateText({ ...retries(), ...options, model: languageModel(model) }),
     options.prompt ?? options.messages,
   );
 }
@@ -177,6 +184,7 @@ export async function callObject<Schema extends z.ZodType>(
     info,
     (model) =>
       generateText({
+        ...retries(),
         ...rest,
         model: languageModel(model),
         output: Output.object({ schema }),
@@ -214,6 +222,7 @@ export async function callEmbedMany(
     const result = await embedMany({
       model: google().embedding(EMBEDDING_MODEL.slice("google/".length)),
       values,
+      ...retries(),
       providerOptions: {
         google: { outputDimensionality: EMBEDDING_DIMENSIONS },
       },
@@ -240,6 +249,7 @@ export function callStream(info: CallInfo, options: StreamOptions) {
   const model = info.model ?? defaultModel();
   const row = rowFor(info, model, performance.now());
   return streamText({
+    ...retries(),
     ...options,
     model: languageModel(model),
     onFinish: ({ totalUsage }) => logCall(row(true, totalUsage)),

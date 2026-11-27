@@ -21,6 +21,8 @@ import {
 } from "@/evals/harness";
 
 if (existsSync(".env.local")) process.loadEnvFile(".env.local");
+// Free Google keys allow 15 requests a minute: wait and retry instead of failing.
+process.env.AI_MAX_RETRIES ??= "8";
 
 const arg = (name: string, fallback: string) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -81,7 +83,7 @@ for (const variant of variants) {
     description: `Ask Copper, ${variant === "multi" ? "Copper + Refund agent" : "one support agent"}`,
     metadata: { variant },
     data: dataset.items,
-    maxConcurrency: 3,
+    maxConcurrency: Number(process.env.EVAL_CONCURRENCY ?? 1),
     task: async ({ metadata }) => {
       const testCase = caseOf({ metadata });
       const answer = await answerCase(testCase, variant);
